@@ -1,4 +1,5 @@
-from flask import Flask, request, make_response, jsonify
+from flask import Flask, request, make_response, jsonify, session
+from flask_bcrypt import Bcrypt
 from flask_restful import Api, Resource
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -9,8 +10,10 @@ from functools import wraps
 app = Flask(__name__)
 api = Api(app)
 CORS(app)
+bcrypt = Bcrypt(app)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///db.sqlite'
+app.config['SECRET_KEY'] = 'rahasia'
 db = SQLAlchemy(app)
 
 def batas(f):
@@ -20,7 +23,7 @@ def batas(f):
         if not token:
             return make_response(jsonify({"msg" : "Masukkan token terlebih dahulu"}))
         try:
-            output = jwt.decode(token, "rahasia", algorithms=["HS256"])
+            output = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
         except:
             return make_response(jsonify({"msg" : "Token invalid atau expired"}))
         return f(*args, **kwargs)
@@ -30,21 +33,25 @@ class LoginUser(Resource):
     def post(self):
         username = request.form.get("username")
         password = request.form.get("password")
+        
+        cek = User.query.filter_by(username=username).first()
+        is_valid = bcrypt.check_password_hash(cek.password, password)
 
-        if username and password == "tesapi":
+        if cek and is_valid == True:
             token = jwt.encode(
                 {
                 "username" : username,
                 "exp" : datetime.datetime.utcnow() + datetime.timedelta(minutes=10)
-                }, "rahasia", algorithm="HS256"
+                }, app.config['SECRET_KEY'], algorithm="HS256"
             )
+            session['username'] = username
             return jsonify(
                 {
                     "token" : token,
                     "msg" : "Anda berhasil login"
                 }
             )
-        return {"msg" : "Silahkan login"}
+        return {"msg" : is_valid}
     
 api.add_resource(LoginUser, "/login", methods=["POST"])
 
@@ -79,6 +86,7 @@ class PageCustom(db.Model):
     id_page = db.Column(db.Integer, primary_key=True)
     url = db.Column(db.String)
     page_content = db.Column(db.TEXT)
+    username = db.Column(db.Integer, db.ForeignKey('user.username'))
 
     def save(self):
         try:
@@ -102,8 +110,39 @@ class Comment(db.Model):
         except:
             return False
 
+class User(db.Model):
+    id_user = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String, unique=True)
+    password = db.Column(db.String)
+    page = db.relationship('PageCustom', backref='post')
+
+    def save(self):
+        try:
+            db.session.add(self)
+            db.session.commit()
+            return True
+        except:
+            return False
+
+
 db.create_all()
 
+class Register(Resource):
+    def post(self):
+        input_user = request.form.get('username')
+        password = request.form.get('password')
+        pas2 = bcrypt.generate_password_hash(password).decode('utf-8')
+
+        cek = User.query.filter_by(username=input_user).first()
+        if cek :
+            return {'msg' : 'Username telah didaftarkan'}
+        
+        user_baru = User(username = input_user, password=pas2)
+        user_baru.save()
+        return {"msg" : "Data berhasil tersimpan"}
+
+api.add_resource(Register, "/regis", methods=["POST"])
+        
 class Kategori(Resource):
     @batas
     def get(self):
@@ -258,7 +297,8 @@ class Halaman(Resource):
     def post(self):
         input_url = request.form["url"]
         input_content = request.form["page_content"]
-        pag = PageCustom(url = input_url, page_content=input_content)
+        input_username = session['username']
+        pag = PageCustom(url = input_url, page_content=input_content, username=input_username)
         pag.save()
         query = PageCustom.query.all()
         id = []
@@ -276,7 +316,8 @@ class SeleksiHalaman(Resource):
         detail = {
             "ID Page" : query.id_page,
             "URL" : query.url,
-            "Isi Halaman" : query.page_content
+            "Isi Halaman" : query.page_content,
+            "Username" :query.username
         }
         return detail
     
